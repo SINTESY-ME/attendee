@@ -53,6 +53,8 @@ class OpenAIStreamingTranscriber:
         self._client = None
         self._sender_task = None
         self._receiver_task = None
+        self._active_connection_model = None
+        self._session_update_fallback_attempted = False
 
         self.connected = False
         self.reconnecting = True
@@ -116,6 +118,7 @@ class OpenAIStreamingTranscriber:
                         try:
                             async with self._client.realtime.connect(model=connection_model) as connection:
                                 self._connection = connection
+                                self._active_connection_model = connection_model
                                 self.connected = True
                                 self.reconnecting = False
                                 self._send_queue = asyncio.Queue()
@@ -158,17 +161,14 @@ class OpenAIStreamingTranscriber:
             if self._client:
                 await self._client.close()
 
-    async def _send_session_update(self):
-        if not self._connection:
-            return
-
+    def _build_transcription_session_update_event(self):
         transcription_config = {"model": self.transcription_model}
         if self.language:
             transcription_config["language"] = self.language
         if self.prompt:
             transcription_config["prompt"] = self.prompt
 
-        event = {
+        return {
             "type": "session.update",
             "session": {
                 "type": "transcription",
@@ -190,7 +190,78 @@ class OpenAIStreamingTranscriber:
                 "include": ["item.input_audio_transcription.logprobs"],
             },
         }
+
+    def _build_realtime_session_update_event(self):
+        transcription_config = {"model": self.transcription_model}
+        if self.language:
+            transcription_config["language"] = self.language
+        if self.prompt:
+            transcription_config["prompt"] = self.prompt
+
+        return {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "audio": {
+                    "input": {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": OPENAI_REALTIME_SAMPLE_RATE,
+                        },
+                        "transcription": transcription_config,
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 500,
+                        },
+                    }
+                },
+                "include": ["item.input_audio_transcription.logprobs"],
+            },
+        }
+
+    def _build_legacy_realtime_session_update_event(self):
+        transcription_config = {"model": self.transcription_model}
+        if self.language:
+            transcription_config["language"] = self.language
+        if self.prompt:
+            transcription_config["prompt"] = self.prompt
+
+        return {
+            "type": "session.update",
+            "session": {
+                "input_audio_format": "pcm16",
+                "input_audio_transcription": transcription_config,
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                },
+            },
+        }
+
+    async def _send_session_update(self):
+        if not self._connection:
+            return
+
+        model = (self._active_connection_model or "").lower()
+        if "transcribe" in model:
+            event = self._build_transcription_session_update_event()
+        else:
+            event = self._build_realtime_session_update_event()
+
         await self._connection.send(event)
+
+    async def _send_session_update_realtime_fallback(self):
+        if not self._connection:
+            return
+
+        try:
+            await self._connection.send(self._build_realtime_session_update_event())
+        except Exception:
+            await self._connection.send(self._build_legacy_realtime_session_update_event())
 
     async def _sender_loop(self):
         while not self.should_stop:
@@ -224,7 +295,7 @@ class OpenAIStreamingTranscriber:
         try:
             async for event in self._connection:
                 message = self._event_to_dict(event)
-                self._handle_realtime_message(message)
+                await self._handle_realtime_message(message)
         except Exception as e:
             if not self.should_stop:
                 logger.warning(f"[{self._participant_name}] OpenAI realtime SDK receiver closed unexpectedly: {e}")
@@ -256,7 +327,7 @@ class OpenAIStreamingTranscriber:
             return " ".join(text_parts)
         return None
 
-    def _handle_realtime_message(self, message):
+    async def _handle_realtime_message(self, message):
         message_type = message.get("type")
 
         if message_type == "conversation.item.input_audio_transcription.completed":
@@ -271,6 +342,17 @@ class OpenAIStreamingTranscriber:
 
         if message_type == "error":
             logger.error(f"[{self._participant_name}] OpenAI realtime error event: {message}")
+            error_message = (message.get("error") or {}).get("message", "")
+            if (
+                "transcription session update event" in str(error_message).lower()
+                and not self._session_update_fallback_attempted
+            ):
+                self._session_update_fallback_attempted = True
+                logger.info(f"[{self._participant_name}] Retrying session.update with realtime-compatible payload")
+                try:
+                    await self._send_session_update_realtime_fallback()
+                except Exception as fallback_error:
+                    logger.error(f"[{self._participant_name}] Realtime fallback session.update failed: {fallback_error}")
 
     def _emit_utterance(self, transcript_text):
         if not self.save_utterance_callback:
