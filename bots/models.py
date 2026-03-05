@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 TRANSCRIPTION_DEFAULT_MODES = ("automatic", "custom")
 TRANSCRIPTION_CONVERSION_SAMPLE_RATE_OPTIONS = (8000, 16000, 32000, 48000)
+TRANSCRIPTION_PROCESSING_MODES = ("automatic", "chunks", "realtime")
 OUTPUT_FILE_MODES = ("video", "audio")
 OUTPUT_FILE_AUDIO_BITRATE_OPTIONS_KBPS = (16, 24, 32, 48, 64, 96, 128, 160, 192)
 
@@ -63,6 +64,12 @@ class Project(models.Model):
             if values is not None:
                 logger.warning(f"Ignoring non-object transcription defaults from {source}")
             return
+
+        transcription_mode = values.get("transcription_mode")
+        if transcription_mode in TRANSCRIPTION_PROCESSING_MODES:
+            defaults["transcription_mode"] = transcription_mode
+        elif transcription_mode is not None:
+            logger.warning(f"Ignoring invalid transcription_mode from {source}: {transcription_mode}")
 
         silence_mode = values.get("silence_closure_mode")
         if silence_mode in TRANSCRIPTION_DEFAULT_MODES:
@@ -113,6 +120,7 @@ class Project(models.Model):
 
     def effective_transcription_defaults(self):
         defaults = {
+            "transcription_mode": "automatic",
             "silence_closure_mode": "automatic",
             "silence_closure_seconds": None,
             "max_segment_mode": "automatic",
@@ -123,6 +131,7 @@ class Project(models.Model):
         self._apply_transcription_defaults(
             defaults,
             {
+                "transcription_mode": os.getenv("BOT_DEFAULT_TRANSCRIPTION_MODE"),
                 "silence_closure_mode": os.getenv("BOT_DEFAULT_TRANSCRIPTION_SILENCE_MODE"),
                 "silence_closure_seconds": os.getenv("BOT_DEFAULT_TRANSCRIPTION_SILENCE_SECONDS"),
                 "max_segment_mode": os.getenv("BOT_DEFAULT_TRANSCRIPTION_MAX_SEGMENT_MODE"),
@@ -201,6 +210,8 @@ class Project(models.Model):
         defaults = self.effective_transcription_defaults()
         overrides = {}
 
+        if defaults["transcription_mode"] != "automatic":
+            overrides["transcription_mode_override"] = defaults["transcription_mode"]
         if defaults["silence_closure_mode"] == "custom":
             overrides["silence_duration_seconds_override"] = defaults["silence_closure_seconds"]
         if defaults["max_segment_mode"] == "custom":
@@ -714,6 +725,12 @@ class TranscriptionSettings:
         default_model = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-transcribe")
         return self._settings.get("openai", {}).get("model", default_model)
 
+    def openai_realtime_transcription_model(self):
+        model = self.openai_transcription_model()
+        if model == "gpt-4o-transcribe-diarize":
+            return "gpt-4o-transcribe"
+        return model
+
     def openai_transcription_language(self):
         return self._settings.get("openai", {}).get("language", None)
 
@@ -1183,6 +1200,12 @@ class Bot(models.Model):
             return None
 
         if value in TRANSCRIPTION_CONVERSION_SAMPLE_RATE_OPTIONS:
+            return value
+        return None
+
+    def transcription_runtime_mode_override(self):
+        value = self.transcription_runtime_settings().get("transcription_mode_override")
+        if value in TRANSCRIPTION_PROCESSING_MODES and value != "automatic":
             return value
         return None
 

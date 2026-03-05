@@ -752,6 +752,11 @@ class BotModelTest(TransactionTestCase):
         self.assertEqual(response_format, "diarized_json")
         self.assertEqual(chunking_strategy, "auto")
 
+    @mock.patch.dict("os.environ", {"OPENAI_MODEL_NAME": "gpt-4o-transcribe-diarize"})
+    def test_openai_realtime_transcription_model_fallbacks_from_diarize(self):
+        model = self.bot.transcription_settings.openai_realtime_transcription_model()
+        self.assertEqual(model, "gpt-4o-transcribe")
+
 
 class GladiaProviderTest(TransactionTestCase):
     """Unit‑tests for bots.tasks.process_utterance_task.get_transcription_via_gladia"""

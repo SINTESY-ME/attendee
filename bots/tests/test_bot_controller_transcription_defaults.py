@@ -45,3 +45,40 @@ class BotControllerTranscriptionDefaultsTest(TestCase):
         controller = BotController(self.bot.id)
         self.assertEqual(controller.non_streaming_audio_silence_duration_limit(), 1)
         self.assertEqual(controller.non_streaming_audio_utterance_size_limit(), 1920000)
+
+    def test_chunks_mode_forces_non_streaming_even_for_deepgram(self):
+        self.bot.settings = {
+            "recording_settings": {"format": "mp4"},
+            "transcription_settings": {"deepgram": {"callback": "https://example.com/deepgram-callback"}},
+            "transcription_runtime_settings": {"transcription_mode_override": "chunks"},
+        }
+        self.bot.save()
+        self.recording.transcription_provider = TranscriptionProviders.DEEPGRAM
+        self.recording.save()
+
+        controller = BotController(self.bot.id)
+        self.assertFalse(controller.use_streaming_transcription())
+
+    def test_realtime_mode_uses_streaming_for_openai(self):
+        self.bot.settings = {
+            "recording_settings": {"format": "mp4"},
+            "transcription_runtime_settings": {"transcription_mode_override": "realtime"},
+        }
+        self.bot.save()
+        self.recording.transcription_provider = TranscriptionProviders.OPENAI
+        self.recording.save()
+
+        controller = BotController(self.bot.id)
+        self.assertTrue(controller.use_streaming_transcription())
+
+    def test_automatic_mode_keeps_openai_non_streaming(self):
+        self.bot.settings = {
+            "recording_settings": {"format": "mp4"},
+            "transcription_runtime_settings": {},
+        }
+        self.bot.save()
+        self.recording.transcription_provider = TranscriptionProviders.OPENAI
+        self.recording.save()
+
+        controller = BotController(self.bot.id)
+        self.assertFalse(controller.use_streaming_transcription())

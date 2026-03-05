@@ -50,6 +50,7 @@ from .models import (
     OUTPUT_FILE_MODES,
     TRANSCRIPTION_CONVERSION_SAMPLE_RATE_OPTIONS,
     TRANSCRIPTION_DEFAULT_MODES,
+    TRANSCRIPTION_PROCESSING_MODES,
     Utterance,
     WebhookDeliveryAttempt,
     WebhookDeliveryAttemptStatus,
@@ -907,6 +908,7 @@ class ProjectProjectView(AdminRequiredMixin, ProjectUrlContextMixin, View):
 
 def normalize_transcription_defaults_from_data(data):
     normalized = {
+        "transcription_mode": data.get("transcription_mode", "automatic"),
         "silence_closure_mode": data.get("silence_closure_mode", "automatic"),
         "silence_closure_seconds": None,
         "max_segment_mode": data.get("max_segment_mode", "automatic"),
@@ -914,6 +916,9 @@ def normalize_transcription_defaults_from_data(data):
         "conversion_sample_rate": data.get("conversion_sample_rate", "automatic"),
     }
     errors = []
+
+    if normalized["transcription_mode"] not in TRANSCRIPTION_PROCESSING_MODES:
+        errors.append("transcription_mode must be automatic, chunks or realtime")
 
     if normalized["silence_closure_mode"] not in TRANSCRIPTION_DEFAULT_MODES:
         errors.append("silence_closure_mode must be automatic or custom")

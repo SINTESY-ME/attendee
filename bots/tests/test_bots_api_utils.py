@@ -83,6 +83,7 @@ class TestCreateBot(TestCase):
 
     def test_create_bot_applies_project_global_defaults(self):
         self.project.transcription_defaults = {
+            "transcription_mode": "realtime",
             "silence_closure_mode": "custom",
             "silence_closure_seconds": 1.5,
             "max_segment_mode": "custom",
@@ -105,6 +106,7 @@ class TestCreateBot(TestCase):
         self.assertEqual(
             bot.settings["transcription_runtime_settings"],
             {
+                "transcription_mode_override": "realtime",
                 "silence_duration_seconds_override": 1.5,
                 "max_segment_seconds_override": 90,
                 "conversion_sample_rate_override": 16000,
@@ -140,6 +142,7 @@ class TestCreateBot(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "BOT_DEFAULT_TRANSCRIPTION_MODE": "chunks",
             "BOT_DEFAULT_TRANSCRIPTION_SILENCE_MODE": "custom",
             "BOT_DEFAULT_TRANSCRIPTION_SILENCE_SECONDS": "2.0",
             "BOT_DEFAULT_TRANSCRIPTION_MAX_SEGMENT_MODE": "custom",
@@ -161,6 +164,7 @@ class TestCreateBot(TestCase):
         self.assertEqual(
             bot.settings["transcription_runtime_settings"],
             {
+                "transcription_mode_override": "chunks",
                 "silence_duration_seconds_override": 2.0,
                 "max_segment_seconds_override": 75,
                 "conversion_sample_rate_override": 32000,

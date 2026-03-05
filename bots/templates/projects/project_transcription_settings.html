@@ -17,6 +17,16 @@
         {% csrf_token %}
 
         <div class="mb-4">
+          <label for="transcriptionMode" class="form-label">Modo de transcrição</label>
+          <select class="form-select" id="transcriptionMode" name="transcription_mode">
+            <option value="automatic" {% if transcription_defaults.transcription_mode == 'automatic' %}selected{% endif %}>Padrão (como está hoje)</option>
+            <option value="chunks" {% if transcription_defaults.transcription_mode == 'chunks' %}selected{% endif %}>Chunks</option>
+            <option value="realtime" {% if transcription_defaults.transcription_mode == 'realtime' %}selected{% endif %}>Realtime</option>
+          </select>
+          <div class="form-text">`Padrão` mantém a lógica atual. `Chunks` força segmentação por silêncio/tamanho. `Realtime` força caminho de baixa latência.</div>
+        </div>
+
+        <div class="mb-4">
           <label class="form-label">Fechamento por silêncio</label>
           <div class="form-check">
             <input class="form-check-input" type="radio" name="silence_closure_mode" id="silenceModeAutomatic" value="automatic" {% if transcription_defaults.silence_closure_mode == 'automatic' %}checked{% endif %}>

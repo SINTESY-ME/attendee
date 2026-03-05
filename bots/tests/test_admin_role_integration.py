@@ -130,7 +130,7 @@ class AdminRoleIntegrationTest(TransactionTestCase):
 
         response = self.client.put(
             reverse("bots:project-transcription-settings", kwargs={"object_id": self.project.object_id}),
-            data="silence_closure_mode=custom&silence_closure_seconds=1.5&max_segment_mode=custom&max_segment_seconds=90&conversion_sample_rate=16000",
+            data="transcription_mode=automatic&silence_closure_mode=custom&silence_closure_seconds=1.5&max_segment_mode=custom&max_segment_seconds=90&conversion_sample_rate=16000",
             content_type="application/x-www-form-urlencoded",
         )
 
@@ -139,6 +139,7 @@ class AdminRoleIntegrationTest(TransactionTestCase):
         self.assertEqual(
             self.project.transcription_defaults,
             {
+                "transcription_mode": "automatic",
                 "silence_closure_mode": "custom",
                 "silence_closure_seconds": 1.5,
                 "max_segment_mode": "custom",
@@ -186,7 +187,7 @@ class AdminRoleIntegrationTest(TransactionTestCase):
 
         response = self.client.put(
             reverse("bots:project-transcription-settings", kwargs={"object_id": self.project.object_id}),
-            data="silence_closure_mode=custom&silence_closure_seconds=1.5&max_segment_mode=custom&max_segment_seconds=90&conversion_sample_rate=16000",
+            data="transcription_mode=automatic&silence_closure_mode=custom&silence_closure_seconds=1.5&max_segment_mode=custom&max_segment_seconds=90&conversion_sample_rate=16000",
             content_type="application/x-www-form-urlencoded",
         )
 
@@ -215,7 +216,7 @@ class AdminRoleIntegrationTest(TransactionTestCase):
 
         response = self.client.put(
             reverse("bots:project-transcription-settings", kwargs={"object_id": self.project.object_id}),
-            data="silence_closure_mode=custom&silence_closure_seconds=99&max_segment_mode=custom&max_segment_seconds=0&conversion_sample_rate=12345",
+            data="transcription_mode=realtime&silence_closure_mode=custom&silence_closure_seconds=99&max_segment_mode=custom&max_segment_seconds=0&conversion_sample_rate=12345",
             content_type="application/x-www-form-urlencoded",
         )
 

@@ -89,7 +89,23 @@ class BotController:
     # Default wait time for utterance termination (5 minutes)
     UTTERANCE_TERMINATION_WAIT_TIME_SECONDS = 300
 
+    def provider_supports_true_streaming_transcription(self):
+        provider = self.get_recording_transcription_provider()
+        return provider in [TranscriptionProviders.DEEPGRAM, TranscriptionProviders.KYUTAI, TranscriptionProviders.OPENAI]
+
+    def transcription_mode_override(self):
+        return self.bot_in_db.transcription_runtime_mode_override()
+
+    def use_low_latency_chunks_for_realtime_mode(self):
+        return self.transcription_mode_override() == "realtime" and not self.provider_supports_true_streaming_transcription()
+
     def use_streaming_transcription(self):
+        mode_override = self.transcription_mode_override()
+        if mode_override == "chunks":
+            return False
+        if mode_override == "realtime":
+            return self.provider_supports_true_streaming_transcription()
+
         provider = self.get_recording_transcription_provider()
         if provider == TranscriptionProviders.KYUTAI:
             return True
@@ -761,6 +777,9 @@ class BotController:
         if max_segment_seconds_override is not None:
             return self.get_per_participant_audio_sample_rate() * 2 * max_segment_seconds_override
 
+        if self.use_low_latency_chunks_for_realtime_mode():
+            return self.get_per_participant_audio_sample_rate() * 2 * 2
+
         if self.get_recording_transcription_provider() == TranscriptionProviders.SARVAM:
             return 1920000  # 30 seconds of audio at 32kHz
         else:
@@ -770,6 +789,9 @@ class BotController:
         silence_duration_seconds_override = self.bot_in_db.transcription_runtime_silence_duration_seconds_override()
         if silence_duration_seconds_override is not None:
             return silence_duration_seconds_override
+
+        if self.use_low_latency_chunks_for_realtime_mode():
+            return 0.5
 
         if self.get_recording_transcription_provider() == TranscriptionProviders.SARVAM:
             return 1  # seconds
