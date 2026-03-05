@@ -3,6 +3,7 @@ import audioop
 import base64
 import logging
 import os
+import queue
 import threading
 import time
 
@@ -55,6 +56,14 @@ class OpenAIStreamingTranscriber:
         self._receiver_task = None
         self._active_connection_model = None
         self._session_update_fallback_attempted = False
+        self._callback_queue = queue.Queue()
+        self._callback_worker_stop = threading.Event()
+        self._callback_worker_thread = threading.Thread(
+            target=self._callback_worker_loop,
+            daemon=True,
+            name="openai-callback-worker",
+        )
+        self._callback_worker_thread.start()
 
         self.connected = False
         self.reconnecting = True
@@ -62,6 +71,25 @@ class OpenAIStreamingTranscriber:
 
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
         self._start_event_loop()
+
+    def _callback_worker_loop(self):
+        while not self._callback_worker_stop.is_set():
+            try:
+                callback_data = self._callback_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            if callback_data is None:
+                self._callback_queue.task_done()
+                break
+
+            transcript_text, metadata = callback_data
+            try:
+                self.save_utterance_callback(transcript_text, metadata)
+            except Exception as e:
+                logger.error(f"[{self._participant_name}] Error in OpenAI save_utterance_callback: {e}", exc_info=True)
+            finally:
+                self._callback_queue.task_done()
 
     def _connection_model_candidates(self):
         candidates = [
@@ -364,9 +392,9 @@ class OpenAIStreamingTranscriber:
         }
 
         try:
-            self.save_utterance_callback(transcript_text, metadata)
+            self._callback_queue.put((transcript_text, metadata))
         except Exception as e:
-            logger.error(f"[{self._participant_name}] Error in OpenAI save_utterance_callback: {e}", exc_info=True)
+            logger.error(f"[{self._participant_name}] Error queueing utterance callback: {e}", exc_info=True)
 
     def _enqueue_audio_append(self, chunk):
         if not self._loop or not self._send_queue:
@@ -466,5 +494,13 @@ class OpenAIStreamingTranscriber:
             if self._loop_thread and self._loop_thread.is_alive():
                 self._loop_thread.join(timeout=2)
         finally:
+            self._callback_worker_stop.set()
+            try:
+                self._callback_queue.put(None)
+            except Exception:
+                pass
+            if self._callback_worker_thread and self._callback_worker_thread.is_alive():
+                self._callback_worker_thread.join(timeout=2)
+
             self.connected = False
             self.reconnecting = False
