@@ -1,14 +1,12 @@
 import asyncio
 import audioop
 import base64
-import json
 import logging
 import os
 import threading
 import time
-from urllib.parse import quote, urlparse, urlunparse
 
-import websockets
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +47,8 @@ class OpenAIStreamingTranscriber:
         self._loop = None
         self._loop_thread = None
         self._send_queue = None
-        self._ws_connection = None
+        self._connection = None
+        self._client = None
         self._sender_task = None
         self._receiver_task = None
 
@@ -57,21 +56,8 @@ class OpenAIStreamingTranscriber:
         self.reconnecting = True
         self.should_stop = False
 
-        self.ws_url = self._realtime_ws_url()
+        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
         self._start_event_loop()
-
-    def _realtime_ws_url(self):
-        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
-        parsed = urlparse(base_url if "://" in base_url else f"https://{base_url}")
-
-        scheme = "wss" if parsed.scheme == "https" else "ws"
-        path = parsed.path.rstrip("/")
-        if not path:
-            path = "/v1"
-
-        realtime_path = f"{path}/realtime"
-        query = f"model={quote(self.model)}"
-        return urlunparse((scheme, parsed.netloc, realtime_path, "", query, ""))
 
     def _start_event_loop(self):
         self._loop = asyncio.new_event_loop()
@@ -93,59 +79,55 @@ class OpenAIStreamingTranscriber:
         start_time = time.time()
         backoff_seconds = [1, 2, 4, 8]
 
-        while not self.should_stop:
-            elapsed = time.time() - start_time
-            if elapsed >= self.max_retry_time:
-                logger.error(f"[{self._participant_name}] OpenAI realtime connection timed out after {self.max_retry_time}s")
-                self.reconnecting = False
-                return
+        self._client = AsyncOpenAI(api_key=self.openai_api_key, base_url=self.base_url)
 
-            attempt += 1
-            try:
-                logger.info(f"[{self._participant_name}] Connecting to OpenAI realtime (attempt {attempt})")
-                additional_headers = {
-                    "Authorization": f"Bearer {self.openai_api_key}",
-                    "OpenAI-Beta": "realtime=v1",
-                }
-
-                async with websockets.connect(
-                    self.ws_url,
-                    additional_headers=additional_headers,
-                    ping_interval=20,
-                    ping_timeout=10,
-                    max_size=16 * 1024 * 1024,
-                ) as ws:
-                    self._ws_connection = ws
-                    self.connected = True
+        try:
+            while not self.should_stop:
+                elapsed = time.time() - start_time
+                if elapsed >= self.max_retry_time:
+                    logger.error(f"[{self._participant_name}] OpenAI realtime connection timed out after {self.max_retry_time}s")
                     self.reconnecting = False
-                    self._send_queue = asyncio.Queue()
-
-                    await self._send_session_update()
-
-                    self._receiver_task = asyncio.create_task(self._receiver_loop())
-                    self._sender_task = asyncio.create_task(self._sender_loop())
-
-                    await asyncio.gather(self._receiver_task, self._sender_task, return_exceptions=True)
-
-                if self.should_stop:
                     return
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                logger.warning(f"[{self._participant_name}] OpenAI realtime connection error: {e}")
 
+                attempt += 1
+                try:
+                    logger.info(f"[{self._participant_name}] Connecting to OpenAI realtime via SDK (attempt {attempt})")
+
+                    async with self._client.realtime.connect(model=self.model) as connection:
+                        self._connection = connection
+                        self.connected = True
+                        self.reconnecting = False
+                        self._send_queue = asyncio.Queue()
+
+                        await self._send_session_update()
+
+                        self._receiver_task = asyncio.create_task(self._receiver_loop())
+                        self._sender_task = asyncio.create_task(self._sender_loop())
+
+                        await asyncio.gather(self._receiver_task, self._sender_task, return_exceptions=True)
+
+                    if self.should_stop:
+                        return
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    logger.warning(f"[{self._participant_name}] OpenAI realtime SDK connection error: {e}")
+
+                self.connected = False
+                self.reconnecting = True
+                self._connection = None
+                self._send_queue = None
+
+                delay = backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
+                await asyncio.sleep(delay)
+        finally:
+            self.reconnecting = False
             self.connected = False
-            self.reconnecting = True
-            self._ws_connection = None
-            self._send_queue = None
-
-            delay = backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
-            await asyncio.sleep(delay)
-
-        self.reconnecting = False
+            if self._client:
+                await self._client.close()
 
     async def _send_session_update(self):
-        if not self._ws_connection:
+        if not self._connection:
             return
 
         input_audio_transcription = {
@@ -167,40 +149,44 @@ class OpenAIStreamingTranscriber:
                 },
             },
         }
-        await self._ws_connection.send(json.dumps(event))
+        await self._connection.send(event)
 
     async def _sender_loop(self):
         while not self.should_stop:
             try:
                 payload = await asyncio.wait_for(self._send_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
-                if not self.connected or not self._ws_connection:
+                if not self.connected or not self._connection:
                     return
                 continue
 
-            if not self.connected or not self._ws_connection:
+            if not self.connected or not self._connection:
                 return
 
             try:
-                await self._ws_connection.send(payload)
+                await self._connection.send(payload)
             except Exception as e:
-                logger.warning(f"[{self._participant_name}] OpenAI realtime send failed: {e}")
+                logger.warning(f"[{self._participant_name}] OpenAI realtime SDK send failed: {e}")
                 self.connected = False
                 return
 
+    def _event_to_dict(self, event):
+        if isinstance(event, dict):
+            return event
+        if hasattr(event, "model_dump"):
+            return event.model_dump()
+        if hasattr(event, "to_dict"):
+            return event.to_dict()
+        return {}
+
     async def _receiver_loop(self):
         try:
-            async for raw_message in self._ws_connection:
-                try:
-                    message = json.loads(raw_message)
-                except Exception:
-                    logger.debug(f"[{self._participant_name}] Could not decode OpenAI realtime message")
-                    continue
-
+            async for event in self._connection:
+                message = self._event_to_dict(event)
                 self._handle_realtime_message(message)
         except Exception as e:
             if not self.should_stop:
-                logger.warning(f"[{self._participant_name}] OpenAI realtime receiver closed unexpectedly: {e}")
+                logger.warning(f"[{self._participant_name}] OpenAI realtime SDK receiver closed unexpectedly: {e}")
         finally:
             self.connected = False
 
@@ -263,12 +249,10 @@ class OpenAIStreamingTranscriber:
         if not self._loop or not self._send_queue:
             return
 
-        payload = json.dumps(
-            {
-                "type": "input_audio_buffer.append",
-                "audio": base64.b64encode(chunk).decode("ascii"),
-            }
-        )
+        payload = {
+            "type": "input_audio_buffer.append",
+            "audio": base64.b64encode(chunk).decode("ascii"),
+        }
 
         try:
             self._loop.call_soon_threadsafe(self._send_queue.put_nowait, payload)
@@ -278,7 +262,7 @@ class OpenAIStreamingTranscriber:
 
     def send(self, audio_data):
         if not self.connected and not self.reconnecting and not self.should_stop:
-            raise ConnectionError("OpenAI realtime WebSocket connection failed permanently")
+            raise ConnectionError("OpenAI realtime SDK connection failed permanently")
 
         if not self.connected or self.should_stop:
             return
@@ -307,27 +291,25 @@ class OpenAIStreamingTranscriber:
             self.connected = False
 
     async def _flush_buffer_and_commit(self):
-        if self._send_queue and self._ws_connection and self.connected:
+        if self._send_queue and self._connection and self.connected:
             while True:
                 try:
                     pending_payload = self._send_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
-                await self._ws_connection.send(pending_payload)
+                await self._connection.send(pending_payload)
 
-        if self._audio_buffer and self._ws_connection and self.connected:
-            await self._ws_connection.send(
-                json.dumps(
-                    {
-                        "type": "input_audio_buffer.append",
-                        "audio": base64.b64encode(bytes(self._audio_buffer)).decode("ascii"),
-                    }
-                )
+        if self._audio_buffer and self._connection and self.connected:
+            await self._connection.send(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(bytes(self._audio_buffer)).decode("ascii"),
+                }
             )
             self._audio_buffer = bytearray()
 
-        if self._ws_connection and self.connected:
-            await self._ws_connection.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        if self._connection and self.connected:
+            await self._connection.send({"type": "input_audio_buffer.commit"})
             await asyncio.sleep(0.2)
 
     def finish(self):
@@ -343,10 +325,12 @@ class OpenAIStreamingTranscriber:
                 async def flush_and_close():
                     try:
                         await self._flush_buffer_and_commit()
-                        if self._ws_connection:
-                            await self._ws_connection.close()
+                        if self._connection and hasattr(self._connection, "close"):
+                            await self._connection.close()
+                        if self._client:
+                            await self._client.close()
                     except Exception as e:
-                        logger.warning(f"[{self._participant_name}] Error closing OpenAI realtime connection: {e}")
+                        logger.warning(f"[{self._participant_name}] Error closing OpenAI realtime SDK connection: {e}")
 
                 future = asyncio.run_coroutine_threadsafe(flush_and_close(), self._loop)
                 try:
