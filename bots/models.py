@@ -725,10 +725,19 @@ class TranscriptionSettings:
         default_model = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-transcribe")
         return self._settings.get("openai", {}).get("model", default_model)
 
+    def openai_realtime_connection_model(self):
+        default_model = os.getenv("OPENAI_REALTIME_CONNECTION_MODEL", "gpt-realtime")
+        return self._settings.get("openai", {}).get("realtime_connection_model", default_model)
+
     def openai_realtime_transcription_model(self):
-        model = self.openai_transcription_model()
+        model = self._settings.get("openai", {}).get(
+            "realtime_transcription_model",
+            self.openai_transcription_model(),
+        )
         if model == "gpt-4o-transcribe-diarize":
             return "gpt-4o-transcribe"
+        if model not in {"gpt-4o-transcribe", "gpt-4o-mini-transcribe"}:
+            return os.getenv("OPENAI_REALTIME_TRANSCRIPTION_MODEL", "gpt-4o-transcribe")
         return model
 
     def openai_transcription_language(self):

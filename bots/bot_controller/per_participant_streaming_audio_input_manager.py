@@ -170,7 +170,8 @@ class PerParticipantStreamingAudioInputManager:
 
             return OpenAIStreamingTranscriber(
                 openai_api_key=self.openai_api_key,
-                model=self.bot.transcription_settings.openai_realtime_transcription_model(),
+                connection_model=self.bot.transcription_settings.openai_realtime_connection_model(),
+                transcription_model=self.bot.transcription_settings.openai_realtime_transcription_model(),
                 sample_rate=self.sample_rate,
                 metadata=metadata,
                 language=self.bot.transcription_settings.openai_transcription_language(),

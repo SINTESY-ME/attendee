@@ -21,7 +21,8 @@ class OpenAIStreamingTranscriber:
         self,
         *,
         openai_api_key,
-        model,
+        connection_model,
+        transcription_model,
         sample_rate,
         metadata=None,
         language=None,
@@ -30,7 +31,8 @@ class OpenAIStreamingTranscriber:
         max_retry_time=120,
     ):
         self.openai_api_key = openai_api_key
-        self.model = model
+        self.connection_model = connection_model
+        self.transcription_model = transcription_model
         self.sample_rate = sample_rate
         self.metadata = metadata or {}
         self.language = language
@@ -58,6 +60,22 @@ class OpenAIStreamingTranscriber:
 
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
         self._start_event_loop()
+
+    def _connection_model_candidates(self):
+        candidates = [
+            self.connection_model,
+            self.transcription_model,
+            "gpt-realtime",
+            "gpt-4o-realtime-preview",
+            "gpt-4o-transcribe-latest",
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+        ]
+        deduped = []
+        for candidate in candidates:
+            if candidate and candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
 
     def _start_event_loop(self):
         self._loop = asyncio.new_event_loop()
@@ -93,18 +111,32 @@ class OpenAIStreamingTranscriber:
                 try:
                     logger.info(f"[{self._participant_name}] Connecting to OpenAI realtime via SDK (attempt {attempt})")
 
-                    async with self._client.realtime.connect(model=self.model) as connection:
-                        self._connection = connection
-                        self.connected = True
-                        self.reconnecting = False
-                        self._send_queue = asyncio.Queue()
+                    connected = False
+                    for connection_model in self._connection_model_candidates():
+                        try:
+                            async with self._client.realtime.connect(model=connection_model) as connection:
+                                self._connection = connection
+                                self.connected = True
+                                self.reconnecting = False
+                                self._send_queue = asyncio.Queue()
 
-                        await self._send_session_update()
+                                await self._send_session_update()
 
-                        self._receiver_task = asyncio.create_task(self._receiver_loop())
-                        self._sender_task = asyncio.create_task(self._sender_loop())
+                                self._receiver_task = asyncio.create_task(self._receiver_loop())
+                                self._sender_task = asyncio.create_task(self._sender_loop())
 
-                        await asyncio.gather(self._receiver_task, self._sender_task, return_exceptions=True)
+                                await asyncio.gather(self._receiver_task, self._sender_task, return_exceptions=True)
+
+                            connected = True
+                            break
+                        except Exception as connection_error:
+                            if "invalid_model" in str(connection_error).lower():
+                                logger.warning(f"[{self._participant_name}] Realtime model '{connection_model}' was rejected, trying next fallback")
+                                continue
+                            raise
+
+                    if not connected and not self.should_stop:
+                        raise Exception("No valid OpenAI realtime connection model available")
 
                     if self.should_stop:
                         return
@@ -130,23 +162,32 @@ class OpenAIStreamingTranscriber:
         if not self._connection:
             return
 
-        input_audio_transcription = {
-            "model": self.model,
-        }
+        transcription_config = {"model": self.transcription_model}
         if self.language:
-            input_audio_transcription["language"] = self.language
+            transcription_config["language"] = self.language
         if self.prompt:
-            input_audio_transcription["prompt"] = self.prompt
+            transcription_config["prompt"] = self.prompt
 
         event = {
             "type": "session.update",
             "session": {
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": input_audio_transcription,
-                "turn_detection": {
-                    "type": "server_vad",
-                    "silence_duration_ms": 500,
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": OPENAI_REALTIME_SAMPLE_RATE,
+                        },
+                        "transcription": transcription_config,
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 500,
+                        },
+                    },
                 },
+                "include": ["item.input_audio_transcription.logprobs"],
             },
         }
         await self._connection.send(event)

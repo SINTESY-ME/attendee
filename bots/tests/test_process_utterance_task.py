@@ -757,6 +757,11 @@ class BotModelTest(TransactionTestCase):
         model = self.bot.transcription_settings.openai_realtime_transcription_model()
         self.assertEqual(model, "gpt-4o-transcribe")
 
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_openai_realtime_connection_model_default(self):
+        model = self.bot.transcription_settings.openai_realtime_connection_model()
+        self.assertEqual(model, "gpt-realtime")
+
 
 class GladiaProviderTest(TransactionTestCase):
     """Unit‑tests for bots.tasks.process_utterance_task.get_transcription_via_gladia"""
