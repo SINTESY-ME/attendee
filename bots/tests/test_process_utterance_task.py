@@ -913,41 +913,57 @@ class OpenAIProviderTest(TransactionTestCase):
         self.creds = Credentials.objects.create(project=self.project, credential_type=Credentials.CredentialTypes.OPENAI)
 
     # ────────────────────────────────────────────────────────────────────────────────
-    @mock.patch("bots.tasks.process_utterance_task.requests.post")
+    @mock.patch("bots.tasks.process_utterance_task.OpenAI")
     @mock.patch("bots.tasks.process_utterance_task.pcm_to_mp3", return_value=b"mp3")
-    def test_success_path(self, mock_pcm, mock_post):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"text": "hello!"}
+    def test_success_path(self, mock_pcm, mock_openai):
+        mock_openai_client = mock_openai.return_value
+        mock_openai_client.audio.transcriptions.create.return_value = {"text": "hello!"}
+
         with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "sk‑XYZ"}):
             tx, failure = get_transcription_via_openai(self.utt)
 
         self.assertIsNone(failure)
         self.assertEqual(tx, {"transcript": "hello!"})
         mock_pcm.assert_called_once_with(b"pcm", sample_rate=16_000)
-        mock_post.assert_called_once()  # ensure request made
+        mock_openai.assert_called_once_with(api_key="sk‑XYZ")
+        mock_openai_client.audio.transcriptions.create.assert_called_once()
+        mock_openai_client.close.assert_called_once()
 
     # ────────────────────────────────────────────────────────────────────────────────
-    @mock.patch("bots.tasks.process_utterance_task.requests.post")
+    @mock.patch("bots.tasks.process_utterance_task.OpenAI")
     @mock.patch("bots.tasks.process_utterance_task.pcm_to_mp3", return_value=b"mp3")
-    def test_invalid_credentials(self, mock_pcm, mock_post):
-        mock_post.return_value.status_code = 401
-        with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "bad"}):
-            tx, failure = get_transcription_via_openai(self.utt)
+    def test_invalid_credentials(self, mock_pcm, mock_openai):
+        class FakeAuthenticationError(Exception):
+            pass
+
+        mock_openai_client = mock_openai.return_value
+        with mock.patch("bots.tasks.process_utterance_task.AuthenticationError", FakeAuthenticationError):
+            mock_openai_client.audio.transcriptions.create.side_effect = FakeAuthenticationError("bad credentials")
+            with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "bad"}):
+                tx, failure = get_transcription_via_openai(self.utt)
 
         self.assertIsNone(tx)
         self.assertEqual(
             failure,
             {"reason": TranscriptionFailureReasons.CREDENTIALS_INVALID},
         )
+        mock_openai_client.close.assert_called_once()
 
     # ────────────────────────────────────────────────────────────────────────────────
-    @mock.patch("bots.tasks.process_utterance_task.requests.post")
+    @mock.patch("bots.tasks.process_utterance_task.OpenAI")
     @mock.patch("bots.tasks.process_utterance_task.pcm_to_mp3", return_value=b"mp3")
-    def test_request_failure(self, mock_pcm, mock_post):
-        mock_post.return_value.status_code = 500
-        mock_post.return_value.text = "boom"
-        with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "sk"}):
-            tx, failure = get_transcription_via_openai(self.utt)
+    def test_request_failure(self, mock_pcm, mock_openai):
+        class FakeAPIStatusError(Exception):
+            def __init__(self, status_code, response_text):
+                super().__init__(response_text)
+                self.status_code = status_code
+                self.response = mock.Mock(text=response_text)
+
+        mock_openai_client = mock_openai.return_value
+        with mock.patch("bots.tasks.process_utterance_task.APIStatusError", FakeAPIStatusError):
+            mock_openai_client.audio.transcriptions.create.side_effect = FakeAPIStatusError(500, "boom")
+            with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "sk"}):
+                tx, failure = get_transcription_via_openai(self.utt)
 
         self.assertIsNone(tx)
         self.assertEqual(
@@ -958,6 +974,7 @@ class OpenAIProviderTest(TransactionTestCase):
                 "response_text": "boom",
             },
         )
+        mock_openai_client.close.assert_called_once()
 
     # ────────────────────────────────────────────────────────────────────────────────
     def test_no_credentials(self):
@@ -969,68 +986,63 @@ class OpenAIProviderTest(TransactionTestCase):
         self.assertEqual(failure, {"reason": TranscriptionFailureReasons.CREDENTIALS_NOT_FOUND})
 
     # ────────────────────────────────────────────────────────────────────────────────
-    @mock.patch("bots.tasks.process_utterance_task.requests.post")
+    @mock.patch("bots.tasks.process_utterance_task.OpenAI")
     @mock.patch("bots.tasks.process_utterance_task.pcm_to_mp3", return_value=b"mp3")
     @mock.patch.dict("os.environ", {"OPENAI_BASE_URL": "https://custom.openai.com/v1"})
-    def test_custom_base_url_from_env(self, mock_pcm, mock_post):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"text": "custom endpoint!"}
+    def test_custom_base_url_from_env(self, mock_pcm, mock_openai):
+        mock_openai_client = mock_openai.return_value
+        mock_openai_client.audio.transcriptions.create.return_value = {"text": "custom endpoint!"}
+
         with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "sk‑XYZ"}):
             tx, failure = get_transcription_via_openai(self.utt)
 
         self.assertIsNone(failure)
         self.assertEqual(tx, {"transcript": "custom endpoint!"})
-        # Verify that the custom base URL was used
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        self.assertEqual(call_args[0][0], "https://custom.openai.com/v1/audio/transcriptions")
+        mock_openai.assert_called_once_with(api_key="sk‑XYZ", base_url="https://custom.openai.com/v1")
+        mock_openai_client.close.assert_called_once()
 
     # ────────────────────────────────────────────────────────────────────────────────
-    @mock.patch("bots.tasks.process_utterance_task.requests.post")
+    @mock.patch("bots.tasks.process_utterance_task.OpenAI")
     @mock.patch("bots.tasks.process_utterance_task.pcm_to_mp3", return_value=b"mp3")
     @mock.patch.dict("os.environ", {"OPENAI_MODEL_NAME": "custom-model"})
-    def test_custom_model_name_from_env(self, mock_pcm, mock_post):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"text": "custom model!"}
+    def test_custom_model_name_from_env(self, mock_pcm, mock_openai):
+        mock_openai_client = mock_openai.return_value
+        mock_openai_client.audio.transcriptions.create.return_value = {"text": "custom model!"}
+
         with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "sk‑XYZ"}):
             tx, failure = get_transcription_via_openai(self.utt)
 
         self.assertIsNone(failure)
         self.assertEqual(tx, {"transcript": "custom model!"})
-        # Verify that the custom model name was used
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        files_dict = call_args[1]["files"]
-        self.assertEqual(files_dict["model"][1], "custom-model")
+        call_args = mock_openai_client.audio.transcriptions.create.call_args
+        self.assertEqual(call_args[1]["model"], "custom-model")
+        mock_openai_client.close.assert_called_once()
 
     # ────────────────────────────────────────────────────────────────────────────────
-    @mock.patch("bots.tasks.process_utterance_task.requests.post")
+    @mock.patch("bots.tasks.process_utterance_task.OpenAI")
     @mock.patch("bots.tasks.process_utterance_task.pcm_to_mp3", return_value=b"mp3")
     @mock.patch.dict("os.environ", {"OPENAI_BASE_URL": "https://custom-ai-endpoint.example.com/v1", "OPENAI_MODEL_NAME": "gpt-4-turbo-transcribe"})
-    def test_both_env_vars_together(self, mock_pcm, mock_post):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"text": "both custom!"}
+    def test_both_env_vars_together(self, mock_pcm, mock_openai):
+        mock_openai_client = mock_openai.return_value
+        mock_openai_client.audio.transcriptions.create.return_value = {"text": "both custom!"}
+
         with mock.patch.object(self.creds.__class__, "get_credentials", return_value={"api_key": "sk‑XYZ"}):
             tx, failure = get_transcription_via_openai(self.utt)
 
         self.assertIsNone(failure)
         self.assertEqual(tx, {"transcript": "both custom!"})
-        # Verify both custom values were used
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        print("call_args", call_args)
-        self.assertEqual(call_args[0][0], "https://custom-ai-endpoint.example.com/v1/audio/transcriptions")
-        files_dict = call_args[1]["files"]
-        self.assertEqual(files_dict["model"][1], "gpt-4-turbo-transcribe")
+        mock_openai.assert_called_once_with(api_key="sk‑XYZ", base_url="https://custom-ai-endpoint.example.com/v1")
+        call_args = mock_openai_client.audio.transcriptions.create.call_args
+        self.assertEqual(call_args[1]["model"], "gpt-4-turbo-transcribe")
+        mock_openai_client.close.assert_called_once()
 
     # ────────────────────────────────────────────────────────────────────────────────
-    @mock.patch("bots.tasks.process_utterance_task.requests.post")
+    @mock.patch("bots.tasks.process_utterance_task.OpenAI")
     @mock.patch("bots.tasks.process_utterance_task.pcm_to_mp3", return_value=b"mp3")
-    def test_diarized_json_transformation(self, mock_pcm, mock_post):
+    def test_diarized_json_transformation(self, mock_pcm, mock_openai):
         """Test that diarized_json format is transformed to Attendee's expected transcription schema"""
-        # Mock diarized_json response with segments
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
+        mock_openai_client = mock_openai.return_value
+        mock_openai_client.audio.transcriptions.create.return_value = {
             "text": "Hey, what's up? I'm good, thank you!",
             "segments": [
                 {"text": "Hey, what's up?", "start": 0.08, "end": 0.28, "speaker": "A"},
@@ -1056,6 +1068,7 @@ class OpenAIProviderTest(TransactionTestCase):
         self.assertEqual(tx["words"][0]["start"], 0.08)
         self.assertEqual(tx["words"][0]["end"], 0.28)
         self.assertEqual(tx["words"][0]["speaker"], "A")
+        mock_openai_client.close.assert_called_once()
 
 
 class OpenAIModelValidationTest(TransactionTestCase):

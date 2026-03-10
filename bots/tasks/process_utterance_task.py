@@ -5,6 +5,7 @@ import time
 
 import requests
 from celery import shared_task
+from openai import APIConnectionError, APIStatusError, AuthenticationError, OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,45 @@ def transform_diarized_json_to_schema(result):
         transcription["words"] = words
 
     return transcription
+
+
+def normalize_openai_transcription_result(result):
+    if isinstance(result, str):
+        return {"text": result}
+
+    if isinstance(result, dict):
+        return result
+
+    if hasattr(result, "to_dict"):
+        return result.to_dict()
+
+    if hasattr(result, "model_dump"):
+        return result.model_dump()
+
+    transcription_result = {"text": getattr(result, "text", "")}
+    segments = getattr(result, "segments", None)
+    if segments is not None:
+        normalized_segments = []
+        for segment in segments:
+            if isinstance(segment, dict):
+                normalized_segments.append(segment)
+            elif hasattr(segment, "to_dict"):
+                normalized_segments.append(segment.to_dict())
+            elif hasattr(segment, "model_dump"):
+                normalized_segments.append(segment.model_dump())
+            else:
+                segment_start = getattr(segment, "start", 0.0)
+                normalized_segments.append(
+                    {
+                        "text": getattr(segment, "text", ""),
+                        "start": segment_start,
+                        "end": getattr(segment, "end", segment_start),
+                        "speaker": getattr(segment, "speaker", None),
+                    }
+                )
+        transcription_result["segments"] = normalized_segments
+
+    return transcription_result
 
 
 def get_transcription(utterance):
@@ -321,45 +361,54 @@ def get_transcription_via_openai(utterance):
     payload_mp3 = pcm_to_mp3(utterance.get_audio_blob().tobytes(), sample_rate=utterance.get_sample_rate())
 
     # Prepare the request for OpenAI's transcription API
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    url = f"{base_url}/audio/transcriptions"
-    headers = {
-        "Authorization": f"Bearer {openai_credentials['api_key']}",
-    }
-    files = {"file": ("file.mp3", payload_mp3, "audio/mpeg"), "model": (None, transcription_settings.openai_transcription_model())}
+    request_data = {"file": ("file.mp3", payload_mp3, "audio/mpeg"), "model": transcription_settings.openai_transcription_model()}
     if transcription_settings.openai_transcription_prompt():
-        files["prompt"] = (None, transcription_settings.openai_transcription_prompt())
+        request_data["prompt"] = transcription_settings.openai_transcription_prompt()
     if transcription_settings.openai_transcription_language():
-        files["language"] = (None, transcription_settings.openai_transcription_language())
+        request_data["language"] = transcription_settings.openai_transcription_language()
+
     # Add response_format and chunking_strategy for gpt-4o-transcribe-diarize
     response_format = transcription_settings.openai_transcription_response_format()
     if response_format:
-        files["response_format"] = (None, response_format)
+        request_data["response_format"] = response_format
+
     chunking_strategy = transcription_settings.openai_transcription_chunking_strategy()
     if chunking_strategy:
-        # If chunking_strategy is a dict (server_vad object), JSON stringify it
-        if isinstance(chunking_strategy, dict):
-            files["chunking_strategy"] = (None, json.dumps(chunking_strategy))
-        else:
-            files["chunking_strategy"] = (None, chunking_strategy)
+        request_data["chunking_strategy"] = chunking_strategy
 
-    response = requests.post(url, headers=headers, files=files)
+    openai_kwargs = {"api_key": openai_credentials["api_key"]}
+    openai_base_url = os.getenv("OPENAI_BASE_URL")
+    if openai_base_url:
+        openai_kwargs["base_url"] = openai_base_url
 
-    if response.status_code == 401:
+    openai_client = None
+    try:
+        openai_client = OpenAI(**openai_kwargs)
+        result = openai_client.audio.transcriptions.create(**request_data)
+    except AuthenticationError:
         return None, {"reason": TranscriptionFailureReasons.CREDENTIALS_INVALID}
+    except APIStatusError as e:
+        response_text = ""
+        if getattr(e, "response", None) is not None:
+            response_text = getattr(e.response, "text", "")
 
-    if response.status_code != 200:
-        logger.error(f"OpenAI transcription failed with status code {response.status_code}: {response.text}")
-        return None, {"reason": TranscriptionFailureReasons.TRANSCRIPTION_REQUEST_FAILED, "status_code": response.status_code, "response_text": response.text}
+        logger.error(f"OpenAI transcription failed with status code {e.status_code}: {response_text}")
+        return None, {"reason": TranscriptionFailureReasons.TRANSCRIPTION_REQUEST_FAILED, "status_code": e.status_code, "response_text": response_text}
+    except APIConnectionError as e:
+        logger.error(f"OpenAI transcription request failed: {str(e)}")
+        return None, {"reason": TranscriptionFailureReasons.TRANSCRIPTION_REQUEST_FAILED, "error": str(e)}
+    finally:
+        if openai_client is not None:
+            openai_client.close()
 
-    result = response.json()
+    normalized_result = normalize_openai_transcription_result(result)
     logger.info(f"OpenAI transcription completed successfully for utterance {utterance.id}.")
 
     # If diarized_json format, transform to Attendee's expected transcription schema
     if response_format == "diarized_json":
-        transcription = transform_diarized_json_to_schema(result)
+        transcription = transform_diarized_json_to_schema(normalized_result)
     else:
-        transcription = {"transcript": result.get("text", "")}
+        transcription = {"transcript": normalized_result.get("text", "")}
 
     return transcription, None
 
