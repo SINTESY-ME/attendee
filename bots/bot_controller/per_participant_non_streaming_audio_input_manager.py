@@ -22,7 +22,7 @@ class PerParticipantNonStreamingAudioInputManager:
     QUEUE_ITEM_TYPE_SPEECH_START = "speech_start"
     QUEUE_ITEM_TYPE_SPEECH_STOP = "speech_stop"
     SPEECH_START_PRE_ROLL_SECONDS = 0.5
-    SPEECH_STOP_POST_ROLL_SECONDS = 0.5
+    SPEECH_STOP_POST_ROLL_SECONDS = 5
 
     def __init__(self, *, save_audio_chunk_callback, get_participant_callback, sample_rate, utterance_size_limit, silence_duration_limit, should_print_diagnostic_info):
         self.queue = queue.Queue()
@@ -146,11 +146,17 @@ class PerParticipantNonStreamingAudioInputManager:
         return False
 
     def process_speech_start(self, speaker_id, event_time):
-        if speaker_id in self.pending_speech_stop_deadline:
-            self.pending_speech_stop_deadline.pop(speaker_id, None)
-            self.flush_utterance(speaker_id, reason="speech_start")
+        resumed_within_stop_window = False
+        pending_speech_stop_deadline = self.pending_speech_stop_deadline.get(speaker_id)
+        if pending_speech_stop_deadline is not None:
+            if event_time < pending_speech_stop_deadline:
+                # Treat short pauses as part of the same utterance.
+                self.pending_speech_stop_deadline.pop(speaker_id, None)
+                resumed_within_stop_window = True
+            else:
+                self.flush_utterance(speaker_id, reason="speech_stop")
 
-        if self.event_reported_speaking_state.get(speaker_id) is False:
+        if self.event_reported_speaking_state.get(speaker_id) is False and not resumed_within_stop_window:
             self.flush_utterance(speaker_id, reason="speech_start")
         self.event_reported_speaking_state[speaker_id] = True
 

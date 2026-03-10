@@ -37,20 +37,39 @@ class TestPerParticipantNonStreamingAudioInputManager(TestCase):
         self.manager.add_chunk("speaker-1", start_time, self.non_silent_chunk())
         self.manager.add_chunk("speaker-1", start_time + timedelta(milliseconds=600), self.non_silent_chunk())
         self.manager.add_speech_stop_event("speaker-1", start_time + timedelta(milliseconds=700))
-        self.manager.add_chunk("speaker-1", start_time + timedelta(milliseconds=1200), self.silent_chunk())
+        self.manager.add_chunk("speaker-1", start_time + timedelta(seconds=5), self.silent_chunk())
 
         self.manager.process_chunks()
 
-        # No flush yet: we are still inside the 1s post-roll after SPEECH_STOP.
+        # No flush yet: we are still inside the 5s post-roll after SPEECH_STOP.
         self.assertEqual(len(self.saved_chunks), 0)
 
-        self.manager.add_chunk("speaker-1", start_time + timedelta(milliseconds=1800), self.silent_chunk())
+        self.manager.add_chunk("speaker-1", start_time + timedelta(seconds=6), self.silent_chunk())
         self.manager.process_chunks()
 
         self.assertEqual(len(self.saved_chunks), 1)
         self.assertEqual(self.saved_chunks[0]["flush_reason"], "speech_stop")
         # Pre-roll should move the start timestamp back to include the chunk before SPEECH_START.
         self.assertEqual(self.saved_chunks[0]["timestamp_ms"], int(start_time.timestamp() * 1000))
+
+    def test_speech_start_within_stop_window_cancels_pending_flush(self):
+        start_time = datetime.utcnow()
+        self.manager.add_speech_start_event("speaker-1", start_time)
+        self.manager.add_chunk("speaker-1", start_time + timedelta(milliseconds=100), self.non_silent_chunk())
+        self.manager.add_speech_stop_event("speaker-1", start_time + timedelta(milliseconds=200))
+
+        # Resume speaking before 5s passes, so the first stop should not flush.
+        self.manager.add_speech_start_event("speaker-1", start_time + timedelta(seconds=3))
+        self.manager.add_chunk("speaker-1", start_time + timedelta(seconds=3, milliseconds=100), self.non_silent_chunk())
+
+        # Next stop should flush only after another 5s with no speech.
+        self.manager.add_speech_stop_event("speaker-1", start_time + timedelta(seconds=3, milliseconds=200))
+        self.manager.add_chunk("speaker-1", start_time + timedelta(seconds=9), self.silent_chunk())
+
+        self.manager.process_chunks()
+
+        self.assertEqual(len(self.saved_chunks), 1)
+        self.assertEqual(self.saved_chunks[0]["flush_reason"], "speech_stop")
 
     def test_fallback_silence_still_flushes_when_no_speech_events_arrive(self):
         start_time = datetime.utcnow()
@@ -69,7 +88,7 @@ class TestPerParticipantNonStreamingAudioInputManager(TestCase):
         self.manager.add_speech_start_event("speaker-1", start_time)
         self.manager.add_speech_stop_event("speaker-1", start_time + timedelta(milliseconds=200))
         self.manager.add_chunk("speaker-1", start_time + timedelta(milliseconds=100), self.non_silent_chunk())
-        self.manager.add_chunk("speaker-1", start_time + timedelta(milliseconds=1300), self.silent_chunk())
+        self.manager.add_chunk("speaker-1", start_time + timedelta(seconds=6), self.silent_chunk())
 
         self.manager.process_chunks()
 
