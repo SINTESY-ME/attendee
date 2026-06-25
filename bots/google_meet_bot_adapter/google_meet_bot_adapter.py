@@ -1,5 +1,6 @@
 import json
 import logging
+import tempfile
 from typing import Callable
 
 from bots.google_meet_bot_adapter.google_meet_ui_methods import (
@@ -32,6 +33,8 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
         self.number_of_times_blocked_by_google = 0
         self.number_of_times_mocap_sequence_not_available = 0
         self.ui_interaction_mode = ui_interaction_mode
+        self.chrome_user_data_dir = None
+        self.used_cached_google_session = False
 
     def should_retry_joining_meeting_that_requires_login_by_logging_in(self):
         # If we don't have the ability to login, we can't retry
@@ -101,12 +104,34 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
 
     def add_subclass_specific_chrome_options(self, options):
         if self.google_meet_bot_login_should_be_used:
-            options.add_argument("--guest")
+            # Use a temporary user-data-dir instead of --guest.
+            # Chrome's --guest mode (as of Chrome 134) can inherit cookies from the default
+            # profile, which prevents Google from triggering the SAML SSO redirect on the first
+            # attempt. Using a unique temporary profile guarantees a clean session every time,
+            # so the SSO flow works on the first try.
+            self.chrome_user_data_dir = tempfile.mkdtemp(prefix="chrome-gmeet-")
+            options.add_argument(f"--user-data-dir={self.chrome_user_data_dir}")
+            logger.info(f"Using temporary Chrome profile for Google Meet bot login: {self.chrome_user_data_dir}")
 
     def subclass_specific_before_driver_close(self):
         if self.google_meet_bot_login_session:
-            logger.info("Navigating to the logout page to sign out of the Google account")
+            # Only log out if we did NOT use a cached session. Logging out would invalidate
+            # the cached session for other bots that may reuse it.
+            if not self.used_cached_google_session:
+                logger.info("Navigating to the logout page to sign out of the Google account")
+                try:
+                    self.driver.get("https://www.google.com/accounts/logout")
+                except Exception as e:
+                    logger.warning(f"Error navigating to the logout page to sign out of the Google account: {e}")
+            else:
+                logger.info("Skipping Google logout because session was from cache (preserving for reuse by other bots)")
+
+        # Clean up the temporary Chrome profile directory
+        if self.chrome_user_data_dir:
             try:
-                self.driver.get("https://www.google.com/accounts/logout")
+                import shutil
+
+                shutil.rmtree(self.chrome_user_data_dir, ignore_errors=True)
+                logger.info(f"Cleaned up temporary Chrome profile: {self.chrome_user_data_dir}")
             except Exception as e:
-                logger.warning(f"Error navigating to the logout page to sign out of the Google account: {e}")
+                logger.warning(f"Failed to clean up temporary Chrome profile: {e}")

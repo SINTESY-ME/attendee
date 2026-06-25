@@ -1050,8 +1050,15 @@ class GoogleMeetUIMethods:
             except Exception:
                 logger.exception("Error logging in to Google Meet account with Okta. Continuing with regular login flow.")
 
+        # Create the login session first so we have the login_email for cache keying
         self.google_meet_bot_login_session = self.create_google_meet_bot_login_session_callback()
-        logger.info("Logging in to Google Meet account")
+
+        # Try to restore a cached Google session from redis. If successful, skip the SSO flow entirely.
+        if self._establish_cached_google_session():
+            logger.info("Google login complete using cached session. Skipping SSO flow.")
+            return
+
+        logger.info("No cached Google session available (or cache invalid). Proceeding with SSO login flow.")
         session_id = self.google_meet_bot_login_session.get("session_id")
         google_meet_set_cookie_url = get_google_meet_set_cookie_url(session_id)
         logger.info(f"Navigating to Google Meet set cookie URL: {mask_url_query_param_values(google_meet_set_cookie_url)}")
@@ -1067,15 +1074,145 @@ class GoogleMeetUIMethods:
 
         # Wait for cookies indicating that we have logged in successfully
         start_waiting_at = time.time()
+        saml_continue_clicked = False
         while not self.has_google_cookies_that_indicate_logged_in(self.driver):
             time.sleep(1)
             logger.info(f"Waiting for cookies indicating that we have logged in successfully. Current URL: {self.driver.current_url}")
+
+            # Google shows a SAML "confirm account" speedbump that requires clicking "Continue"
+            if "speedbump/samlconfirmaccount" in self.driver.current_url and not saml_continue_clicked:
+                try:
+                    continue_button = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Continue')] | //input[@type='submit'] | //div[@role='button'][contains(., 'Continue')]")))
+                    continue_button.click()
+                    saml_continue_clicked = True
+                    logger.info("Clicked SAML confirm account Continue button")
+                except Exception as e:
+                    logger.warning(f"Could not click SAML Continue button: {e}")
+
             if time.time() - start_waiting_at > 30:
                 # We'll raise an exception if it's not logged in after 30 seconds
                 logger.warning(f"Login timed out, after 30 seconds, no Google auth cookies were present. Current URL: {self.driver.current_url}")
                 raise UiLoginAttemptFailedException("No Google auth cookies were present", "login_to_google_meet_account")
 
         logger.info(f"After waiting, URL is {self.driver.current_url}")
+
+        # Cache the Google auth cookies in redis so subsequent bots can skip the SSO flow entirely.
+        self._save_google_session_to_redis()
+
+    def _google_session_redis_key(self):
+        """Redis key for caching Google auth cookies, scoped per login email."""
+        login_email = self.google_meet_bot_login_session.get("login_email", "") if self.google_meet_bot_login_session else ""
+        fingerprint = hashlib.sha256(login_email.encode()).hexdigest()
+        return f"google_meet_session:{fingerprint}"
+
+    def _clear_cached_google_session(self, redis_client=None):
+        """Remove the cached Google session cookies and usage counter from redis."""
+        try:
+            if redis_client is None:
+                redis_client = redis.from_url(settings.REDIS_URL_WITH_PARAMS)
+            cookie_key = self._google_session_redis_key()
+            redis_client.delete(cookie_key, f"{cookie_key}:uses")
+        except Exception as e:
+            logger.warning(f"Failed to clear cached Google session from redis: {e}")
+
+    def _establish_cached_google_session(self):
+        """Try to restore a cached Google session from redis. Returns True if successful, False otherwise.
+
+        If a cached session exists, injects all the Google auth cookies into the driver and
+        navigates to Gmail to verify the session is still valid.
+        Cached sessions are also expired after being used MAX_GOOGLE_MEET_SESSION_USES times
+        to limit the blast radius if Google invalidates the session early.
+        """
+        redis_client = redis.from_url(settings.REDIS_URL_WITH_PARAMS)
+        cookie_key = self._google_session_redis_key()
+        usage_key = f"{cookie_key}:uses"
+        max_session_uses = int(os.getenv("GOOGLE_MEET_BOT_LOGIN_MAX_SESSION_USES", "20"))
+
+        cookie_data_raw = redis_client.get(cookie_key)
+        if not cookie_data_raw:
+            return False
+
+        # Atomically increment the usage counter so concurrent bots agree on use count.
+        use_count = redis_client.incr(usage_key)
+        if use_count > max_session_uses:
+            logger.info(f"Cached Google session has been used {use_count - 1} times (limit {max_session_uses}). Discarding and regenerating.")
+            self._clear_cached_google_session(redis_client)
+            return False
+
+        try:
+            cookies = json.loads(cookie_data_raw)
+            logger.info(f"Found cached Google session in redis (use {use_count}/{max_session_uses}). Injecting {len(cookies)} cookies into driver.")
+            # Navigate to google.com first so we can set cookies for the google.com domain
+            self.driver.get("https://www.google.com/")
+            for cookie in cookies:
+                self.driver.add_cookie(cookie)
+
+            # Verify the session is still valid by navigating to Gmail
+            self.driver.get("https://mail.google.com/")
+            if self.has_google_cookies_that_indicate_logged_in(self.driver):
+                logger.info("Cached Google session is valid. Skipping SSO flow.")
+                self.used_cached_google_session = True
+                return True
+            else:
+                logger.warning("Cached Google session appears to be invalid. Will regenerate.")
+                self._clear_cached_google_session(redis_client)
+                # Clear the invalid cookies from the driver
+                self.driver.delete_all_cookies()
+                return False
+        except Exception as e:
+            logger.warning(f"Failed to use cached Google session from redis ({e}). Will regenerate.")
+            self._clear_cached_google_session(redis_client)
+            return False
+
+    def _save_google_session_to_redis(self):
+        """Cache the Google auth cookies in redis for reuse by subsequent bots."""
+        try:
+            redis_client = redis.from_url(settings.REDIS_URL_WITH_PARAMS)
+            cookie_key = self._google_session_redis_key()
+
+            # Use CDP to get ALL cookies from all domains, not just the current page's domain.
+            # driver.get_cookies() only returns cookies for the current domain, which may miss
+            # auth cookies on .google.com when the browser is on accounts.google.com.
+            try:
+                cdp_result = self.driver.execute_cdp_cmd("Network.getAllCookies", {})
+                all_cookies = cdp_result.get("cookies", [])
+            except Exception:
+                # Fallback: navigate to google.com first so get_cookies returns .google.com cookies
+                self.driver.get("https://www.google.com/")
+                all_cookies = self.driver.get_cookies()
+
+            google_auth_cookie_names = {
+                "SID",
+                "HSID",
+                "SSID",
+                "APISID",
+                "SAPISID",
+                "__Secure-1PSID",
+                "__Secure-3PSID",
+                "__Secure-1PAPISID",
+                "__Secure-3PAPISID",
+                "SIDCC",
+                "OSID",
+                "__Secure-OSID",
+                "__Secure-1PSIDCC",
+                "__Secure-3PSIDCC",
+                "NID",
+                "__Secure-ENID",
+                "COMPASS",
+            }
+            auth_cookies = [c for c in all_cookies if c.get("name") in google_auth_cookie_names]
+            if not auth_cookies:
+                logger.warning("No Google auth cookies found to cache.")
+                return
+
+            # Cache for 30 minutes; well below typical Google session lifetime so we never serve a stale cookie.
+            cache_ttl_seconds = int(os.getenv("GOOGLE_MEET_BOT_LOGIN_SESSION_CACHE_TTL", str(60 * 30)))
+            redis_client.setex(cookie_key, cache_ttl_seconds, json.dumps(auth_cookies))
+            # Reset the usage counter so it tracks uses of this freshly minted session only.
+            redis_client.delete(f"{cookie_key}:uses")
+            logger.info(f"Cached {len(auth_cookies)} Google auth cookies in redis (TTL {cache_ttl_seconds}s)")
+        except Exception as e:
+            logger.warning(f"Failed to cache Google session cookies in redis: {e}")
 
     def has_google_cookies_that_indicate_logged_in(self, driver) -> bool:
         google_auth_cookie_names = {
