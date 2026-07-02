@@ -901,15 +901,7 @@ class GoogleMeetUIMethods:
             time.sleep(1)
             logger.info(f"Waiting for Gmail inbox URL. Current URL: {self.get_current_url_fast()}")
 
-            # Google shows a SAML "confirm account" speedbump that requires clicking "Continue"
-            if "speedbump/samlconfirmaccount" in self.driver.current_url and not saml_continue_clicked:
-                try:
-                    continue_button = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Continue')] | //input[@type='submit'] | //div[@role='button'][contains(., 'Continue')]")))
-                    continue_button.click()
-                    saml_continue_clicked = True
-                    logger.info("Clicked SAML confirm account Continue button")
-                except Exception as e:
-                    logger.warning(f"Could not click SAML Continue button: {e}")
+            saml_continue_clicked = self.maybe_click_saml_confirm_account_continue(saml_continue_clicked)
 
             if self.is_logged_into_google_by_url(self.driver):
                 break
@@ -1077,9 +1069,11 @@ class GoogleMeetUIMethods:
 
         # Wait for cookies indicating that we have logged in successfully
         start_waiting_at = time.time()
+        saml_continue_clicked = False
         while not self.is_logged_into_google_by_url(self.driver):
             time.sleep(1)
             logger.info(f"Waiting for Gmail inbox URL indicating that we have logged in successfully. Current URL: {self.get_current_url_fast()}")
+            saml_continue_clicked = self.maybe_click_saml_confirm_account_continue(saml_continue_clicked)
             if self.is_logged_into_google_by_url(self.driver):
                 break
             if time.time() - start_waiting_at > 30:
@@ -1099,6 +1093,33 @@ class GoogleMeetUIMethods:
             return self.driver.execute_script("return window.location.href")
         except Exception:
             return self.driver.current_url
+
+    def maybe_click_saml_confirm_account_continue(self, already_clicked: bool) -> bool:
+        """Click the SAML 'confirm account' Continue button if present."""
+        if already_clicked or "speedbump/samlconfirmaccount" not in self.driver.current_url:
+            return already_clicked
+        try:
+            continue_button = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Continue')] | //input[@type='submit'] | //div[@role='button'][contains(., 'Continue')]")))
+            continue_button.click()
+            logger.info("Clicked SAML confirm account Continue button")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not click SAML Continue button: {e}")
+            return False
+
+    def has_google_cookies_that_indicate_logged_in(self, driver) -> bool:
+        google_auth_cookie_names = {
+            "SID",
+            "HSID",
+            "SSID",
+            "APISID",
+            "SAPISID",
+            "__Secure-1PSID",
+            "__Secure-3PSID",
+            "__Secure-1PAPISID",
+            "__Secure-3PAPISID",
+            "SIDCC",
+        }
 
     def is_logged_into_google_by_url(self, driver) -> bool:
         # Match scheme+host+path only. Matching the raw URL would also match
