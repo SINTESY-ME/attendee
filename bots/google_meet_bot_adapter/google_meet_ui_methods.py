@@ -545,14 +545,7 @@ class GoogleMeetUIMethods:
                 )
 
     def check_if_meeting_is_found(self):
-        meeting_not_found_texts = [
-            "Check your meeting code",
-            "Invalid video call name",
-            "Your meeting code has expired",
-            "The meeting code you entered doesn’t work",
-        ]
-        meeting_not_found_xpath = "//*[" + " or ".join(f'contains(text(), "{text}")' for text in meeting_not_found_texts) + "]"
-        meeting_not_found_element = self.find_element_by_selector(By.XPATH, meeting_not_found_xpath)
+        meeting_not_found_element = self.find_element_by_selector(By.XPATH, '//*[contains(text(), "Check your meeting code") or contains(text(), "Invalid video call name") or contains(text(), "Your meeting code has expired")]')
         if meeting_not_found_element:
             logger.warning("Meeting not found. Raising UiMeetingNotFoundException")
             raise UiMeetingNotFoundException("Meeting not found", "check_if_meeting_is_found")
@@ -894,15 +887,17 @@ class GoogleMeetUIMethods:
         logger.info(f"Navigating to domain-specific Google ServiceLogin: {google_login_url}")
         self.driver.get(google_login_url)
 
-        # Wait for cookies indicating that we have logged in successfully
+        # Wait until the browser reaches the Gmail inbox, which indicates the
+        # SSO/SAML flow completed and Google set the auth cookies. Checking
+        # cookies via driver.get_cookies() is unreliable because it only returns
+        # cookies for the current domain, producing false negatives while Chrome
+        # is on accounts.google.com.
         start_waiting_at = time.time()
         saml_continue_clicked = False
         while not self.is_logged_into_google_by_url(self.driver):
             time.sleep(1)
             logger.info(f"Waiting for Gmail inbox URL. Current URL: {self.get_current_url_fast()}")
-
             saml_continue_clicked = self.maybe_click_saml_confirm_account_continue(saml_continue_clicked)
-
             if self.is_logged_into_google_by_url(self.driver):
                 break
 
@@ -1052,7 +1047,10 @@ class GoogleMeetUIMethods:
             except Exception:
                 logger.exception("Error logging in to Google Meet account with Okta. Continuing with regular login flow.")
 
-        self.google_meet_bot_login_session = self.create_google_meet_bot_login_session_callback()
+        # The session may have already been created in add_subclass_specific_chrome_options
+        # (to determine the login_domain for profile caching). Only call the callback if needed.
+        if not self.google_meet_bot_login_session:
+            self.google_meet_bot_login_session = self.create_google_meet_bot_login_session_callback()
         logger.info("Logging in to Google Meet account")
         session_id = self.google_meet_bot_login_session.get("session_id")
         google_meet_set_cookie_url = get_google_meet_set_cookie_url(session_id)
@@ -1067,7 +1065,11 @@ class GoogleMeetUIMethods:
         else:
             self.navigate_to_gmail_domain_url()
 
-        # Wait for cookies indicating that we have logged in successfully
+        # Wait until the browser reaches the Gmail inbox, which indicates the
+        # SSO/SAML flow completed and Google set the auth cookies. Checking
+        # cookies via driver.get_cookies() is unreliable because it only returns
+        # cookies for the current domain, producing false negatives while Chrome
+        # is on accounts.google.com.
         start_waiting_at = time.time()
         saml_continue_clicked = False
         while not self.is_logged_into_google_by_url(self.driver):
@@ -1077,11 +1079,13 @@ class GoogleMeetUIMethods:
             if self.is_logged_into_google_by_url(self.driver):
                 break
             if time.time() - start_waiting_at > 30:
-                # We'll raise an exception if it's not logged in after 30 seconds
                 logger.warning(f"Login timed out after 30 seconds, did not reach Gmail inbox. Current URL: {self.get_current_url_fast()}")
                 raise UiLoginAttemptFailedException("Did not reach Gmail inbox after SSO login", "login_to_google_meet_account")
 
         logger.info(f"After waiting, URL is {self.get_current_url_fast()}")
+        # Mark that SSO completed so the profile gets uploaded to S3 for reuse
+        # and the Google logout is skipped to preserve the session.
+        self.chrome_profile_sso_completed = True
 
     def get_current_url_fast(self) -> str:
         # driver.current_url blocks until document.readyState === "complete",
@@ -1095,8 +1099,7 @@ class GoogleMeetUIMethods:
             return self.driver.current_url
 
     def maybe_click_saml_confirm_account_continue(self, already_clicked: bool) -> bool:
-        """Click the SAML 'confirm account' Continue button if present."""
-        if already_clicked or "speedbump/samlconfirmaccount" not in self.driver.current_url:
+        if already_clicked or "speedbump/samlconfirmaccount" not in self.get_current_url_fast():
             return already_clicked
         try:
             continue_button = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Continue')] | //input[@type='submit'] | //div[@role='button'][contains(., 'Continue')]")))
@@ -1106,20 +1109,6 @@ class GoogleMeetUIMethods:
         except Exception as e:
             logger.warning(f"Could not click SAML Continue button: {e}")
             return False
-
-    def has_google_cookies_that_indicate_logged_in(self, driver) -> bool:
-        google_auth_cookie_names = {
-            "SID",
-            "HSID",
-            "SSID",
-            "APISID",
-            "SAPISID",
-            "__Secure-1PSID",
-            "__Secure-3PSID",
-            "__Secure-1PAPISID",
-            "__Secure-3PAPISID",
-            "SIDCC",
-        }
 
     def is_logged_into_google_by_url(self, driver) -> bool:
         # Match scheme+host+path only. Matching the raw URL would also match
@@ -1146,7 +1135,11 @@ class GoogleMeetUIMethods:
     # returns nothing if succeeded, raises an exception if failed
     def attempt_to_join_meeting(self):
         if self.google_meet_bot_login_is_available and self.google_meet_bot_login_should_be_used:
-            self.login_to_google_meet_account_with_retries()
+            # If we loaded a cached Chrome profile from S3, skip SSO and go
+            # straight to the meeting. If the cookies expired, the meeting page
+            # will show "Sign in" and we'll retry with a fresh SSO login.
+            if not self.chrome_profile_loaded_from_s3:
+                self.login_to_google_meet_account_with_retries()
 
         layout_to_select = self.get_layout_to_select()
 
