@@ -29,6 +29,7 @@ services:
     networks:
       - attendee_bots_network
       - traefik-public
+      - shared
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -58,6 +59,7 @@ services:
       - .:/attendee
     networks:
       - attendee_bots_network
+      - shared
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -80,6 +82,7 @@ services:
       - .:/attendee
     networks:
       - attendee_bots_network
+      - shared
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -103,6 +106,7 @@ services:
       - "988"
     networks:
       - attendee_bots_network
+      - shared
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -132,6 +136,8 @@ networks:
     name: attendee_bots_network
     driver: bridge
   traefik-public:
+    external: true
+  shared:
     external: true
 
 volumes:
