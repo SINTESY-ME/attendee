@@ -8,6 +8,7 @@ from .base import LOG_FORMATTERS
 
 DEBUG = False
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
+CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "https://meeting.sintesy.me").split(",")
 
 DATABASES = {
     "default": dj_database_url.config(

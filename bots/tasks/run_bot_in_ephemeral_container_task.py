@@ -88,9 +88,9 @@ def run_bot_in_ephemeral_container(self, bot_id: int):
             max_execution_seconds = int(os.getenv("BOT_MAX_EXECUTION_SECONDS", "14400"))
             logger.info(f"Bot {bot_id} has no max_uptime_seconds, using default timeout {max_execution_seconds}s")
 
-        # Command to execute in container with timeout
-        # timeout forces stop after max_execution_seconds
-        command = f"timeout {max_execution_seconds} python manage.py run_bot --botid {bot_id}"
+        # Command to execute in container with timeout.
+        # Give the launcher a short window to attach the secondary network before Django starts.
+        command = f"sh -lc 'sleep 1; exec timeout {max_execution_seconds} python manage.py run_bot --botid {bot_id}'"
 
         # Labels for identification
         labels = {
@@ -120,7 +120,7 @@ def run_bot_in_ephemeral_container(self, bot_id: int):
             mem_limit=mem_limit,
             cpu_quota=cpu_quota,
             cpu_period=cpu_period,
-            network_mode="host",  # Same network mode as workers
+            network=os.getenv("BOT_CONTAINER_NETWORK", "attendee_bots_network"),  # Primary network resolves attendee redis
             security_opt=["seccomp=unconfined"],  # Same config as workers
             # Container will automatically stop after max_execution_seconds thanks to timeout in command
         )
@@ -129,6 +129,16 @@ def run_bot_in_ephemeral_container(self, bot_id: int):
         log_instruction = f"View logs with: docker logs -f {container_name}" if not auto_remove else "Container will auto-remove when done. To keep containers, set BOT_CONTAINER_AUTO_REMOVE=false"
 
         logger.info(f"Ephemeral container {container_name} (ID: {container.short_id}) started for bot {bot_id}. {log_instruction}")
+
+        extra_network = os.getenv("BOT_CONTAINER_EXTRA_NETWORK", "shared")
+        primary_network = os.getenv("BOT_CONTAINER_NETWORK", "attendee_bots_network")
+        if extra_network and extra_network != primary_network:
+            try:
+                client.networks.get(extra_network).connect(container)
+                logger.info(f"Connected ephemeral container {container_name} to extra network {extra_network}")
+            except Exception as e:
+                logger.error(f"Failed to connect {container_name} to extra network {extra_network}: {e}")
+                raise
 
         # Try to capture and log initial container output (first few lines)
         try:

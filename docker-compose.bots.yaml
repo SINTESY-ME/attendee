@@ -1,0 +1,138 @@
+# =============================================================================
+# docker-compose.bots.yaml  (PRODUCAO LOCAL)
+# Roda o Attendee com cada bot em seu proprio container efemero.
+#
+# Modo: LAUNCH_BOT_METHOD=docker-compose-multi-host
+#   - O servico "bot_launcher" escuta a fila "bot_launcher_vm" e, para cada bot,
+#     cria um container Docker efemero (via Docker socket montado).
+#   - Os bots efemeros rodam a imagem "attendee-attendee-app-local" (buildada
+#     abaixo) com `python manage.py run_bot --botid <id>` e entram na rede
+#     "attendee_bots_network" (BOT_CONTAINER_NETWORK) para alcancar
+#     postgres/redis/app pelo nome do servico.
+#
+# Uso:
+#   1. Preencha o .env (Backblaze B2, Postgres, etc.).
+#   2. docker compose -f docker-compose.bots.yaml build
+#   3. docker compose -f docker-compose.bots.yaml up -d
+#   4. docker compose -f docker-compose.bots.yaml exec attendee-app python manage.py migrate
+#   5. docker compose -f docker-compose.bots.yaml exec attendee-app python manage.py collectstatic --noinput
+#   6. Acesse http://localhost:8000
+# =============================================================================
+
+services:
+  attendee-app:
+    build: .
+    image: attendee-attendee-app-local:latest
+    env_file: .env
+    volumes:
+      - .:/attendee
+    networks:
+      - attendee_bots_network
+      - traefik-public
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_SETTINGS_MODULE=attendee.settings.production
+      - REDIS_URL=redis://attendee-redis-1:6379/5
+    # production.py exige DATABASE_URL (lido do .env via dj_database_url),
+    # apontando para o Postgres externo no host (host.docker.internal:5432).
+    command: gunicorn attendee.wsgi --bind 0.0.0.0:8000 --workers 3
+    entrypoint: []
+    depends_on:
+      - redis
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.attendee.entrypoints=websecure"
+      - "traefik.http.routers.attendee.rule=Host(`meeting.sintesy.me`)"
+      - "traefik.http.routers.attendee.tls=true"
+      - "traefik.http.services.attendee.loadbalancer.server.port=8000"
+
+  attendee-worker:
+    build: .
+    image: attendee-attendee-app-local:latest
+    env_file: .env
+    volumes:
+      - .:/attendee
+    networks:
+      - attendee_bots_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - DJANGO_SETTINGS_MODULE=attendee.settings.production
+      - REDIS_URL=redis://attendee-redis-1:6379/5
+      - ENABLE_CHROME_SANDBOX=false
+    # Worker "normal": processa tarefas de webhooks, transcricao, calendario, etc.
+    # NAO consome da fila bot_launcher_vm (essa fila e do bot_launcher).
+    command: celery -A attendee worker -l INFO -Q celery
+    entrypoint: []
+    depends_on:
+      - redis
+
+  # Scheduler: agenda bots agendados e dispara tarefas na fila correta.
+  attendee-scheduler:
+    build: .
+    image: attendee-attendee-app-local:latest
+    env_file: .env
+    volumes:
+      - .:/attendee
+    networks:
+      - attendee_bots_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - DJANGO_SETTINGS_MODULE=attendee.settings.production
+      - REDIS_URL=redis://attendee-redis-1:6379/5
+    command: python manage.py run_scheduler
+    entrypoint: []
+    depends_on:
+      - redis
+
+  # bot_launcher: consome a fila "bot_launcher_vm" e cria containers efemeros
+  # para cada bot via Docker SDK. Precisa do Docker socket do host.
+  bot_launcher:
+    build: .
+    image: attendee-attendee-app-local:latest
+    env_file: .env
+    volumes:
+      - .:/attendee
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "988"
+    networks:
+      - attendee_bots_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - DJANGO_SETTINGS_MODULE=attendee.settings.production
+      - REDIS_URL=redis://attendee-redis-1:6379/5
+      - LAUNCH_BOT_METHOD=docker-compose-multi-host
+      - BOT_CONTAINER_IMAGE=attendee-attendee-app-local:latest
+      - BOT_HOST_CODE_PATH=/root/attendee
+      - BOT_CONTAINER_NETWORK=attendee_bots_network
+    # Consome SOMENTE a fila bot_launcher_vm, onde run_bot_in_ephemeral_container
+    # eh publicada (ver launch_bot_utils.py).
+    command: celery -A attendee worker -l INFO -Q bot_launcher_vm
+    entrypoint: []
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - attendee_bots_network
+    restart: unless-stopped
+    volumes:
+      - redis:/data/redis
+
+networks:
+  attendee_bots_network:
+    name: attendee_bots_network
+    driver: bridge
+  traefik-public:
+    external: true
+
+volumes:
+  redis:
