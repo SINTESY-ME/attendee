@@ -137,6 +137,20 @@ class GoogleMeetUIMethods:
             logger.warning("Login required. Raising UiLoginRequiredException")
             raise UiLoginRequiredException("Login required", step)
 
+        # Detect Google's "Verify it's you" / reauthentication screen by URL.
+        # When a cached Chrome profile has expired cookies, Google redirects to
+        # a reauthentication challenge page (accounts.google.com with /signin or
+        # /challenge path, or myaccount.google.com with /signin/restricted).
+        # Detecting by URL is more robust than matching page text (i18n, A/B tests).
+        current_url = self.get_current_url_fast()
+        if current_url and "accounts.google.com" in current_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(current_url)
+            path = parsed.path or ""
+            if "/signin" in path or "/challenge" in path or "/reauthenticate" in path:
+                logger.warning(f"Detected Google reauthentication screen (URL: {current_url}). Raising UiLoginRequiredException")
+                raise UiLoginRequiredException("Login required (Google reauthentication screen)", step)
+
     def look_for_denied_your_request_element(self, step):
         denied_your_request_element = self.find_element_by_selector(
             By.XPATH,
