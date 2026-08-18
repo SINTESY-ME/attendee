@@ -48,8 +48,14 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
             logger.info("Meeting requires login, but Google meet bot login is not available, so we can't retry")
             return False
 
-        # If we already tried to login, we can't retry
-        if self.google_meet_bot_login_should_be_used:
+        # If we already tried to login (performed SSO), we can't retry.
+        # However, when a cached Chrome profile was loaded from S3, the SSO
+        # flow is skipped entirely (attempt_to_join_meeting skips
+        # login_to_google_meet_account_with_retries). In that case
+        # google_meet_bot_login_should_be_used being True only means we
+        # *intended* to login, not that we actually did. Fall through to
+        # the S3 cache check below so we can retry with a fresh SSO login.
+        if self.google_meet_bot_login_should_be_used and not self.chrome_profile_loaded_from_s3:
             logger.info("Meeting requires login, but we already tried to login, so we can't retry")
             return False
 
