@@ -196,4 +196,3 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
                 logger.info(f"Cleaned up temporary Chrome profile: {self.chrome_user_data_dir}")
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary Chrome profile: {e}")
-
