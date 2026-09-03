@@ -164,7 +164,7 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
             logger.warning(f"Error getting login domain for Chrome profile cache: {e}")
         return None
 
-    def subclass_specific_before_driver_close(self):
+    def subclass_specific_before_driver_close(self, driver):
         # Upload the Chrome profile to S3 if we completed SSO during this
         # session, so future bots can reuse it and skip the SSO flow.
         if self.chrome_profile_sso_completed and self.chrome_user_data_dir:
@@ -183,7 +183,7 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
         elif self.google_meet_bot_login_session:
             logger.info("Navigating to the logout page to sign out of the Google account")
             try:
-                self.driver.get("https://www.google.com/accounts/logout")
+                driver.get("https://www.google.com/accounts/logout")
             except Exception as e:
                 logger.warning(f"Error navigating to the logout page to sign out of the Google account: {e}")
 
