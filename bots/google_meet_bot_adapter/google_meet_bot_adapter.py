@@ -1,7 +1,10 @@
 import json
 import logging
+import os
 import tempfile
 from typing import Callable
+
+from django.conf import settings
 
 from bots.google_meet_bot_adapter.chrome_profile_storage import (
     download_chrome_profile,
@@ -163,6 +166,34 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
         except Exception as e:
             logger.warning(f"Error getting login domain for Chrome profile cache: {e}")
         return None
+
+    def subclass_specific_chrome_policies(self):
+        if not settings.ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME:
+            return {}
+
+        chrome_policies = {
+            "URLBlocklist": ["*"],
+            "URLAllowlist": [
+                "workspace.google.com",
+                "accounts.google.com",
+                "mail.google.com",
+                "meet.google.com",
+                "www.google.com",
+                settings.SITE_DOMAIN,
+            ],
+        }
+
+        # Prevents a speedbump when signing in to Google Meet
+        if self.google_meet_bot_login_should_be_used:
+            chrome_policies["BrowserSignin"] = 0
+
+        if os.getenv("INTERNAL_SITE_DOMAIN"):
+            chrome_policies["URLAllowlist"].append(os.getenv("INTERNAL_SITE_DOMAIN"))
+
+        if os.getenv("USE_OKTA_LOGIN_FOR_SIGNED_IN_GOOGLE_MEET_BOTS", "false") == "true" and os.getenv("OKTA_DOMAIN"):
+            chrome_policies["URLAllowlist"].append(os.getenv("OKTA_DOMAIN"))
+
+        return chrome_policies
 
     def subclass_specific_before_driver_close(self, driver):
         # Upload the Chrome profile to S3 if we completed SSO during this
