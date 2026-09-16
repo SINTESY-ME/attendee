@@ -207,6 +207,8 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
 
     def subclass_specific_chrome_policies(self):
         if not settings.ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME:
+            if settings.MONITOR_DOMAIN_ALLOWLIST_IN_CHROME and self.google_meet_bot_login_should_be_used:
+                return {"BrowserSignin": 0}
             return {}
 
         chrome_policies = {
