@@ -169,35 +169,12 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
             logger.warning(f"Error getting login domain for Chrome profile cache: {e}")
         return None
 
+    def subclass_specific_navigation_config_filename(self):
+        return "google_meet.json"
+
     def subclass_specific_domain_allowlist(self):
-        domain_allowlist = [
-            "accounts.google.com",
-            "accounts.google.co.in",  # India
-            "accounts.google.co.id",  # Indonesia
-            "accounts.google.com.br",  # Brazil
-            "accounts.google.com.mx",  # Mexico
-            "accounts.google.co.jp",  # Japan
-            "accounts.google.de",  # Germany
-            "accounts.google.co.uk",  # United Kingdom
-            "accounts.google.fr",  # France
-            "accounts.google.ca",  # Canada
-            "accounts.google.com.au",  # Australia
-            "accounts.google.co.kr",  # South Korea
-            "accounts.google.es",  # Spain
-            "accounts.google.it",  # Italy
-            "accounts.google.com.ph",  # Philippines
-            "accounts.google.com.ng",  # Nigeria
-            "accounts.google.com.pk",  # Pakistan
-            "accounts.google.com.vn",  # Vietnam
-            "accounts.google.nl",  # Netherlands
-            "accounts.google.com.sg",  # Singapore
-            "workspace.google.com",
-            "mail.google.com",
-            "meet.google.com",
-            "www.google.com",
-            ".apps.google.com",
-            settings.SITE_DOMAIN,
-        ]
+        domain_allowlist = self.navigation_config_domain_allowlist()
+        domain_allowlist.append(settings.SITE_DOMAIN)
 
         if os.getenv("INTERNAL_SITE_DOMAIN"):
             domain_allowlist.append(os.getenv("INTERNAL_SITE_DOMAIN"))
