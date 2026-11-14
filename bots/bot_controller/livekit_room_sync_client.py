@@ -597,12 +597,14 @@ class LivekitRoomSyncClient:
             return
         self._meeting_participants[participant_uuid] = name
         self._left_meeting_releases.pop(participant_uuid, None)
-        # With other bots live, the newcomer may be one of them; give its
-        # announcement a moment to arrive. A lone bot claims right away.
-        settle = self.BOT_ANNOUNCEMENT_SETTLE_SECONDS if len(self._live_bot_ids()) > 1 else 0.0
-        self._schedule_claim_check(participant_uuid, "join", settle=settle)
+        self._schedule_claim_check(participant_uuid, "join", settle=self._bot_announcement_settle())
         # If the watcher isn't ready, its initial/reconnect reconcile picks up
         # this join. No separate waiter task is needed for each participant.
+
+    def _bot_announcement_settle(self):
+        # With other bots live, an unclaimed participant may be one of them;
+        # give its announcement a moment to arrive. A lone bot claims right away.
+        return self.BOT_ANNOUNCEMENT_SETTLE_SECONDS if len(self._live_bot_ids()) > 1 else 0.0
 
     def _handle_own_join(self, participant_uuid):
         if participant_uuid in self._own_bot_participants:
@@ -887,9 +889,10 @@ class LivekitRoomSyncClient:
         present_elsewhere = (roster & watcher.remote_participants.keys()) - owned
         missing = roster - owned - present_elsewhere
         logger.info(f"{self._log_prefix} Ownership ({trigger}): {len(roster)} in meeting, {len(owned)} owned or connecting here, {len(present_elsewhere)} present elsewhere, {len(missing)} missing, {len(self._live_bot_ids())} live bots")
+        settle = self._bot_announcement_settle()
         for participant_uuid in self._meeting_participants:
             if participant_uuid not in self._mirrors and self._claimable(participant_uuid):
-                self._schedule_claim_check(participant_uuid, trigger)
+                self._schedule_claim_check(participant_uuid, trigger, settle=settle)
 
     async def _mirror_participant(self, participant_uuid, name, mirror):
         """Own a participant's entire lifetime, including slow connects/leaves."""
